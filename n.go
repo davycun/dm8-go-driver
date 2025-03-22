@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql/driver"
+	"errors"
 	"github.com/davycun/dm8-go-driver/util"
 	"net"
 	"net/url"
@@ -710,26 +711,103 @@ func (c *DmConnector) parseCluster(props *Properties) {
 }
 
 func (c *DmConnector) parseDSN(dsn string) (*Properties, string, error) {
-	var dsnProps = NewProperties()
-	url, err := url.Parse(dsn)
+	props, host, user, password, err := parseDSN2(dsn)
+
 	if err != nil {
 		return nil, "", err
 	}
-	if url.Scheme != "dm" {
-		return nil, "", DSN_INVALID_SCHEMA
+	c.user = user
+	c.password = password
+	return props, host, nil
+
+	//var dsnProps = NewProperties()
+	//url, err := url.Parse(dsn)
+	//if err != nil {
+	//	return nil, "", err
+	//}
+	//if url.Scheme != "dm" {
+	//	return nil, "", DSN_INVALID_SCHEMA
+	//}
+	//
+	//if url.User != nil {
+	//	c.user = url.User.Username()
+	//	c.password, _ = url.User.Password()
+	//}
+	//
+	//q := url.Query()
+	//for k := range q {
+	//	dsnProps.Set(k, q.Get(k))
+	//}
+	//
+	//return dsnProps, url.Host, nil
+}
+
+var (
+	DSN_INVALID_FORMAT = newDmError(90010, "error.dsn.invalidFormat")
+)
+
+// dm://user:password@host:port[?propName1=propValue1][&propName2=propValue2]…
+// dm://user:password@GroupName[?propName1=propValue1][&propName2=propValue2]…
+// dm://user:password@GroupName?GroupName=(host1:port1,host2:port2,…)[&propName1=propValue1]…
+// dm://user:password@host:port?dialName=anyName[&propName1=propValue1]…
+
+// return *Properties,host, user, password, error
+func parseDSN2(dsn string) (*Properties, string, string, string, error) {
+
+	var (
+		props                = NewProperties()
+		host, user, password string
+	)
+
+	if !strings.HasPrefix(dsn, "dm://") {
+		return nil, host, user, password, DSN_INVALID_SCHEMA
+	}
+	dsn = strings.TrimPrefix(dsn, "dm://")
+	index := strings.LastIndex(dsn, "@")
+	if index == -1 {
+		return nil, host, user, password, DSN_INVALID_FORMAT
 	}
 
-	if url.User != nil {
-		c.user = url.User.Username()
-		c.password, _ = url.User.Password()
+	//用户名中不能包括":"，理论上支持密码中带":"。但是必须存在用户名和密码且用":"分割
+	user, password, found := strings.Cut(dsn[0:index], ":")
+	if !found || user == "" {
+		return nil, host, user, password, errors.New("dsn err, invalid user and password")
 	}
 
-	q := url.Query()
-	for k := range q {
-		dsnProps.Set(k, q.Get(k))
+	//
+	hostOrGroupStr, propStr, found := strings.Cut(dsn[index+1:], "?")
+	if found {
+		for _, ps := range strings.Split(propStr, "&") {
+			k, v, f := strings.Cut(ps, "=")
+			k = strings.TrimSpace(k)
+			if !f {
+				v = k
+			}
+			v = strings.TrimSpace(v)
+			if strings.HasPrefix(v, "(") && strings.HasSuffix(v, ")") {
+				host = strings.TrimSpace(v[1 : len(v)-1])
+			} else {
+				props.Set(k, v)
+			}
+		}
+	}
+	//如果不是GroupName，那么需要带ip/域名和端口通过分号隔开
+	if host == "" && !strings.Contains(hostOrGroupStr, ":") {
+		return nil, host, user, password, errors.New("dsn err, invalid host")
+	}
+	if host == "" {
+		host = hostOrGroupStr
 	}
 
-	return dsnProps, url.Host, nil
+	//可以校验下端口的合法性
+	port := host[strings.LastIndex(host, ":")+1:]
+	for _, b := range port[1:] {
+		if b < '0' || b > '9' {
+			return nil, host, user, password, errors.New("dsn err, invalid port")
+		}
+	}
+
+	return props, host, user, password, nil
 }
 
 func (c *DmConnector) BuildDSN() string {
